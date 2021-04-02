@@ -29,7 +29,7 @@ function [out] = LpAdaptation(oracle, xstart, inopts)
 if nargin==0
     
     N = 10
-    disp('Default options for a N=10 dimensional problem')
+    fprintf('Default options for a N=%i dimensional problem',N)
     out = getDefaultOptions(N);
     return
     
@@ -73,6 +73,22 @@ else
     opts = getoptions(inopts, defopts);
 end
 
+LBound = opts.LBound;
+if (size(LBound,1) ~= N)
+  LBound = LBound';
+  if(size(LBound,1) ~= N)
+    error('Invalid lower bound vector');
+  end
+end
+
+UBound = opts.UBound;
+if (size(UBound,1) ~= N)
+  UBound = UBound';
+  if(size(UBound,1) ~= N)
+    error('Invalid upper bound vector');
+  end
+end
+
 % Remember some other user's choices
 isInitQprovided = isfield(inopts,'initQ');
 isInitCprovided = isfield(inopts,'initC');
@@ -113,6 +129,8 @@ PopSize     = myeval(opts.CMA.PopSize); %number of candidate solutions per itera
 cp          = opts.CMA.cp; %learning constant for evolution path
 % expected length of input entries from sampling procedure
 l_expected = sqrt(N);%get_expectedLength_Lp(N,pn,1e4); %dim, pnorm, numSamples
+UBound = repmat(UBound, [1 PopSize]);
+LBound = repmat(LBound, [1 PopSize]);
 
 % windowSize for empirical hitting probability with moving window
 windowSize = ceil(myeval(opts.windowSizeEval));%ceil(myeval(opts.windowSizeEval)/PopSize);
@@ -240,9 +258,26 @@ condC = cond(Q*Q');
 [outArgs{1:nOut}]= oracleHdl(xstart);
 c_T = outArgs{1};
 
-if c_T ~= 1
-    error('x_start needs to be a feasible point!');
+bOptimization = false;
+
+if isstruct(c_T)
+    if isfield(c_T,'optimization') && isfield(c_T,'feasible')
+        bOptimization = c_T.optimization;
+        c_T = c_T.feasible;
+        if bOptimization
+          fprintf('Perform Covariance Matrix Adaptation Evolution Strategy\n');
+        end
+    else
+        error(['Unknown return format from the oracle. ' ...
+        'Must be either a single integer or a structure with fields ''optimization'' and ''feasible''.']);
+    end
 end
+
+% Bypass this check due to oracle jitter
+%if c_T ~= 1
+%    error('x_start needs to be a feasible point!');
+%end
+c_T = 1;
 
 lastxAcc = xstart;
 
@@ -354,8 +389,8 @@ if isbSavingOn
         ccovmu_Vec  = nan(lPVec,1);
         cntGenVec   = nan(lPVec,1);
         PopSizeVec  = nan(lPVec,1);
-        ccov1_Vec(1)   = ccov1;
-        ccovmu_Vec(1)  = ccovmu;
+        ccov1_Vec(1)  = ccov1;
+        ccovmu_Vec(1) = ccovmu;
         PopSizeVec(1) = PopSize;
     end
  
@@ -476,8 +511,9 @@ end
             disp('Q is nan');
             Q
         end
-        
+
         arx = repmat(mu,1,PopSize) + r * (Q * arz);
+        arx = min(UBound,max(LBound,arx));
         
         if isPlottingOn && isbSavingOn
             plotData(cntVec, countgeneration, saveIndGeneration, muVec, rVec, VerboseModuloGen, N, eigVals, r, P_empVecAll, P_empVecWindow, P_empAll, P_empWindow);
@@ -490,13 +526,25 @@ end
         
         for s=1:PopSize
             [outArgs{1:nOut}]= oracleHdl(arx(:,s));
-            c_T(s) =outArgs{1};
+            if isstruct(outArgs{1})
+              c_T(s) = outArgs{1}.feasible;
+              if bOptimization && (~outArgs{1}.optimization) % switch to DC
+                  out.doDC = true;
+                  out.initQ = Q;
+                  out.xstart = arx(:,s);
+                  fprintf('Quit Covariance Matrix Adaptation Evolution Strategy, switch to Design Centering\n');
+                  %goto('RESTARTDC');
+                  return
+              end
+            else
+              c_T(s) = outArgs{1};
+            end
+
             if nOut >1
-                if any(cellfun('isempty',outArgs(2:end)))
-                    outArgsMat(s,:) = NaN;
-                else
-                    outArgsMat(s,:) = outArgs{2:end};
-                end
+                idxArgs = cellfun(@isscalar,outArgs(2:end));
+
+                outArgsMat(s,~idxArgs) = NaN;
+                outArgsMat(s, idxArgs) = outArgs{[false idxArgs]};
             end
         end
         
@@ -517,7 +565,7 @@ end
             end
         end
         
-        if opts.hitP_adapt == 1
+        if ~bOptimization && opts.hitP_adapt == 1
             rVec_all(countgeneration)=r; %because counteval(1) is for initial values
             if van == 1
                 P_empAll = valP;
@@ -1075,6 +1123,10 @@ mu
 % oracle gives 1 if point is in feasible region, 0 if not
 [outArgs{1:nOut}]= oracleHdl(mu);
 c_T = outArgs{1};
+
+if isstruct(c_T)
+    c_T = c_T.feasible;
+end
 
 if c_T~=1
     warning('lastMu is not in feasible region!');

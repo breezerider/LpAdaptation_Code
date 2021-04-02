@@ -2,6 +2,9 @@ function defopts = getDefaultOptions(N)
 
 % Options defaults:
 
+defopts.UBound          = ones(1,N) *  inf;
+defopts.LBound          = ones(1,N) * -inf;
+
 % maximal number of function evaluations';
 defopts.MaxEval         = 1e4*(N);
 
